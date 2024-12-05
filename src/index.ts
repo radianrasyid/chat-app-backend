@@ -5,11 +5,14 @@ import { Elysia, t } from "elysia";
 import { ElysiaWS } from "elysia/dist/ws";
 import logixlysia from "logixlysia";
 import { db } from "./lib/utils/db";
+import { encryptMessage, generateKeyPair } from "./lib/utils/messaging";
 
 interface ClientInfo {
   id: string;
   username: string;
   socket: ElysiaWS<ServerWebSocket<any>, any, any>;
+  publicKey: string;
+  privateKey: string;
 }
 
 const clients = new Map<string, ClientInfo>();
@@ -51,10 +54,14 @@ const app = new Elysia()
     async ({ set, body }) => {
       const hashedPassword = Bun.password.hashSync(body.password);
 
+      const { publicKey, privateKey } = await generateKeyPair();
+
       const user = await db.user.create({
         data: {
           username: body.username,
           password: hashedPassword,
+          publicKey,
+          privateKey,
         },
       });
 
@@ -116,7 +123,11 @@ const app = new Elysia()
       };
       return {
         message: "Login success",
-        data: jwt,
+        data: {
+          jwt,
+          privateKey: found.privateKey,
+          publicKey: found.publicKey,
+        },
       };
     },
     {
@@ -145,6 +156,7 @@ const app = new Elysia()
           select: {
             username: true,
             id: true,
+            publicKey: true,
           },
           skip,
           take,
@@ -187,6 +199,12 @@ const app = new Elysia()
         where: {
           id: userId.id,
         },
+        select: {
+          id: true,
+          username: true,
+          publicKey: true,
+          privateKey: true,
+        },
       });
 
       if (user == null) {
@@ -198,6 +216,8 @@ const app = new Elysia()
         id: user.id,
         socket: ws,
         username: user.username,
+        publicKey: user.publicKey,
+        privateKey: user.privateKey,
       });
 
       console.log(
@@ -206,19 +226,18 @@ const app = new Elysia()
       );
     },
     message: async (ws, message) => {
-      console.log("received message", message);
-      console.log(ws.data.cookie);
+      console.log(
+        "current client",
+        Array.from(clients.values()).map((i) => i.id)
+      );
       const jwt = ws.data.cookie["auth_cookie"].value;
       const userId = await ws.data.auth_jwt.verify(jwt);
-      console.log("ini value", {
-        jwt,
-        userId,
-      });
       if (userId == false) {
         ws.close();
         return;
       }
-      console.log("received message: %s", message);
+      message.from = userId.id;
+      console.log("received message", message);
       const sender = clients.get(userId.id);
       const recipient = clients.get(message.to);
       if (sender?.id === recipient?.id) {
@@ -234,12 +253,20 @@ const app = new Elysia()
       }
 
       if (sender && recipient) {
+        const encryptedMessage = await encryptMessage(
+          recipient.publicKey,
+          message.message
+        );
+        console.log("ini encrypted message", encryptedMessage);
         recipient.socket.send(
           JSON.stringify({
             from: sender.id,
             to: recipient.id,
             code: 1,
-            message: message.message,
+            message: encryptedMessage,
+            encrypted: true,
+            publicKey: recipient.publicKey,
+            privateKey: recipient.privateKey,
           })
         );
         sender.socket.send(
@@ -247,17 +274,15 @@ const app = new Elysia()
             from: sender.id,
             to: recipient.id,
             code: 0,
-            message: message.message,
+            message: encryptedMessage,
+            encrypted: true,
+            publicKey: recipient.publicKey,
+            privateKey: recipient.privateKey,
           })
         );
       }
     },
-    close: (ws, code, message) => {
-      console.log("connection closed", {
-        code,
-        message,
-      });
-    },
+    close: (ws, code, message) => {},
     body: t.Union([
       t.Object({
         to: t.String(),
