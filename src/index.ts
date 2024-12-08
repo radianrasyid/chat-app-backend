@@ -5,7 +5,8 @@ import { Elysia, t } from "elysia";
 import { ElysiaWS } from "elysia/dist/ws";
 import logixlysia from "logixlysia";
 import { db } from "./lib/utils/db";
-import { decryptMessage, generateKeyPair } from "./lib/utils/messaging";
+import { generateKeyPair } from "./lib/utils/messaging";
+import { CreateUser, FindUserByUsername } from "./repository/user.repository";
 
 interface ClientInfo {
   id: string;
@@ -56,13 +57,11 @@ const app = new Elysia()
 
       const { publicKey, privateKey } = await generateKeyPair();
 
-      const user = await db.user.create({
-        data: {
-          username: body.username,
-          password: hashedPassword,
-          privateKey,
-          publicKey,
-        },
+      const user = await CreateUser({
+        username: body.username,
+        password: hashedPassword,
+        privateKey,
+        publicKey,
       });
 
       set.status = 200;
@@ -84,11 +83,7 @@ const app = new Elysia()
   .post(
     "/login",
     async ({ set, body, auth_jwt, cookie: { auth_cookie } }) => {
-      const found = await db.user.findUnique({
-        where: {
-          username: body.username,
-        },
-      });
+      const found = await FindUserByUsername(body.username);
 
       if (found == null) {
         set.status = 400;
@@ -226,64 +221,96 @@ const app = new Elysia()
       );
     },
     message: async (ws, message) => {
-      console.log(
-        "current client",
-        Array.from(clients.values()).map((i) => i.id)
-      );
-      const jwt = ws.data.cookie["auth_cookie"].value;
-      const userId = await ws.data.auth_jwt.verify(jwt);
-      if (userId == false) {
-        ws.close();
-        return;
-      }
-      message.from = userId.id;
-      console.log("received message", message);
-      const sender = clients.get(userId.id);
-      const recipient = clients.get(message.to);
-      if (sender?.id === recipient?.id) {
-        sender?.socket.send(
-          JSON.stringify({
-            from: "",
-            to: "",
-            code: 3,
-            message: "can not send message to yourself at this version",
-          })
+      try {
+        console.log(
+          "current client",
+          Array.from(clients.values()).map((i) => i.id)
         );
-        return;
-      }
+        const jwt = ws.data.cookie["auth_cookie"].value;
+        const userId = await ws.data.auth_jwt.verify(jwt);
+        if (userId == false) {
+          ws.close();
+          return;
+        }
+        message.from = userId.id;
+        console.log("received message", message);
+        const sender = clients.get(userId.id);
+        const recipient = clients.get(message.to);
+        if (sender?.id === recipient?.id) {
+          sender?.socket.send(
+            JSON.stringify({
+              from: "",
+              to: "",
+              code: 3,
+              message: "can not send message to yourself at this version",
+            })
+          );
+          return;
+        }
 
-      if (sender && recipient) {
-        // const decryptedMessage = await SecureMessaging.decryptMessage(
-        //   sender.privateKey,
-        //   message.message
-        // );
-        // console.log("ini decrypted message", decryptedMessage);
-        // const encryptedMessage = await SecureMessaging.encryptMessage(
-        //   recipient.publicKey,
-        //   decryptedMessage
-        // );
-        // console.log("ini encrypted message", encryptedMessage);
-        recipient.socket.send(
-          JSON.stringify({
-            from: sender.id,
-            to: recipient.id,
-            code: 1,
-            message: message.message,
-            encrypted: true,
-          })
-        );
-        sender.socket.send(
-          JSON.stringify({
-            from: sender.id,
-            to: recipient.id,
-            code: 0,
-            message: await decryptMessage(
-              recipient.privateKey,
-              message.message
-            ),
-            encrypted: true,
-          })
-        );
+        if (sender && recipient) {
+          /**
+           * 1 REPRESENT THE USER IS THE RECIPIENT
+           * 0 REPRESENT THE USER IS THE SENDER
+           */
+
+          recipient.socket.send(
+            JSON.stringify({
+              from: sender.id,
+              to: recipient.id,
+              code: 1,
+              message: message.message,
+              encrypted: true,
+              recipientEncryptedSymmetricKey:
+                message.recipientEncryptedSymmetricKey,
+              senderEncryptedSymmetricKey: message.senderEncryptedSymmetricKey,
+              iv: message.iv,
+            })
+          );
+          sender.socket.send(
+            JSON.stringify({
+              from: sender.id,
+              to: recipient.id,
+              code: 0,
+              message: message.message,
+              encrypted: true,
+              recipientEncryptedSymmetricKey:
+                message.recipientEncryptedSymmetricKey,
+              senderEncryptedSymmetricKey: message.senderEncryptedSymmetricKey,
+              iv: message.iv,
+            })
+          );
+
+          Promise.resolve().then(async () => {
+            try {
+              await db.message.create({
+                data: {
+                  content: message.message,
+                  sender: {
+                    connect: {
+                      id: sender.id,
+                    },
+                  },
+                  recipient: {
+                    connect: {
+                      id: recipient.id,
+                    },
+                  },
+                  encrypted: true,
+                  iv: message.iv,
+                  senderEncryptedSymmetricKey:
+                    message.senderEncryptedSymmetricKey,
+                  recipientEncryptedSymmetricKey:
+                    message.recipientEncryptedSymmetricKey,
+                },
+              });
+            } catch (error) {
+              console.error("Background message save error", error);
+            }
+          });
+        }
+      } catch (error) {
+        console.error("error here", error);
       }
     },
     close: (ws, code, message) => {},
@@ -292,7 +319,11 @@ const app = new Elysia()
         to: t.String(),
         from: t.String(),
         message: t.String(),
+        recipientEncryptedSymmetricKey: t.String(),
+        senderEncryptedSymmetricKey: t.String(),
+        iv: t.String(),
       }),
     ]),
+    error: (error) => error,
   })
   .listen(3000);
