@@ -5,7 +5,7 @@ import { Elysia, t } from "elysia";
 import { ElysiaWS } from "elysia/dist/ws";
 import logixlysia from "logixlysia";
 import { db } from "./lib/utils/db";
-import { encryptMessage, generateKeyPair } from "./lib/utils/messaging";
+import { decryptMessage, generateKeyPair } from "./lib/utils/messaging";
 
 interface ClientInfo {
   id: string;
@@ -60,8 +60,8 @@ const app = new Elysia()
         data: {
           username: body.username,
           password: hashedPassword,
-          publicKey,
           privateKey,
+          publicKey,
         },
       });
 
@@ -253,20 +253,23 @@ const app = new Elysia()
       }
 
       if (sender && recipient) {
-        const encryptedMessage = await encryptMessage(
-          recipient.publicKey,
-          message.message
-        );
-        console.log("ini encrypted message", encryptedMessage);
+        // const decryptedMessage = await SecureMessaging.decryptMessage(
+        //   sender.privateKey,
+        //   message.message
+        // );
+        // console.log("ini decrypted message", decryptedMessage);
+        // const encryptedMessage = await SecureMessaging.encryptMessage(
+        //   recipient.publicKey,
+        //   decryptedMessage
+        // );
+        // console.log("ini encrypted message", encryptedMessage);
         recipient.socket.send(
           JSON.stringify({
             from: sender.id,
             to: recipient.id,
             code: 1,
-            message: encryptedMessage,
+            message: message.message,
             encrypted: true,
-            publicKey: recipient.publicKey,
-            privateKey: recipient.privateKey,
           })
         );
         sender.socket.send(
@@ -274,10 +277,11 @@ const app = new Elysia()
             from: sender.id,
             to: recipient.id,
             code: 0,
-            message: encryptedMessage,
+            message: await decryptMessage(
+              recipient.privateKey,
+              message.message
+            ),
             encrypted: true,
-            publicKey: recipient.publicKey,
-            privateKey: recipient.privateKey,
           })
         );
       }
